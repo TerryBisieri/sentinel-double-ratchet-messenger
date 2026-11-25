@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Double Ratchet E2EE Client — ICS 3201</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+  <!-- Top Navbar -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur px-6 py-4 flex items-center justify-between">
+    <div>
+      <h1 class="text-xl font-bold tracking-tight text-emerald-400">Double Ratchet E2EE Messenger</h1>
+      <p class="text-xs text-slate-400">Signal Protocol (ECDH P-384 + HKDF + AES-GCM) &amp; Government Key Escrow</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1 rounded-full">
+        CA Certificates Verified
+      </span>
+      <button onclick="resetDemo()" class="text-xs bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700 transition">
+        Reset Keys &amp; Session
+      </button>
+    </div>
+  </header>
+
+  <!-- Alert Toast -->
+  <div id="toast" class="hidden fixed bottom-5 right-5 z-50 max-w-md px-4 py-3 rounded-xl shadow-2xl border text-sm font-medium"></div>
+
+  <!-- Main 3-Column Layout -->
+  <main class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+    
+    <!-- Left Column: Chat Client Simulator (5 cols) -->
+    <section class="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col h-[78vh]">
+      <div class="p-4 border-b border-slate-800 flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2 text-sm">
+          <label class="text-slate-400">From:</label>
+          <select id="senderSelect" onchange="refreshUI()" class="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-emerald-400 font-semibold">
+            <option value="Alice">Alice</option>
+            <option value="Bob">Bob</option>
+            <option value="Claire">Claire</option>
+          </select>
+          <label class="text-slate-400 ml-2">To:</label>
+          <select id="recipientSelect" onchange="refreshUI()" class="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-sky-400 font-semibold">
+            <option value="Bob">Bob</option>
+            <option value="Alice">Alice</option>
+            <option value="Claire">Claire</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Messages Feed -->
+      <div id="chatFeed" class="flex-1 overflow-y-auto p-4 space-y-3"></div>
+
+      <!-- Composer -->
+      <div class="p-4 border-t border-slate-800 space-y-2.5 bg-slate-900/90 rounded-b-2xl">
+        <div class="flex gap-2">
+          <input id="msgInput" type="text" placeholder="Type an end-to-end encrypted message..."
+            onkeydown="if(event.key==='Enter') sendMsg(false)"
+            class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:border-emerald-500" />
+          <button onclick="sendMsg(false)" class="bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm px-4 py-2 rounded-xl transition">
+            Send
+          </button>
+        </div>
+        <div class="flex items-center justify-between text-xs text-slate-400">
+        
+          <button onclick="sendMsg(true)" class="text-amber-400 hover:text-amber-300 underline">
+            Send &amp; Hold in Network (Out-of-Order Test)
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Middle Column: Live Double Ratchet State (3 cols) -->
+    <section class="lg:col-span-3 bg-slate-900 border border-slate-800 rounded-2xl p-4 h-[78vh] overflow-y-auto space-y-4">
+      <div>
+        <h2 class="text-sm font-bold uppercase tracking-wider text-slate-300">Ratchet State Inspector</h2>
+        <p class="text-xs text-slate-400 mt-0.5">Live symmetric &amp; DH ratchet counters</p>
+      </div>
+      <div id="ratchetCards" class="space-y-3"></div>
+    </section>
+
+    <!-- Right Column: Wiretap & Cryptographic Packet Inspector (4 cols) -->
+    <section class="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col h-[78vh]">
+      <div class="p-4 border-b border-slate-800">
+        <h2 class="text-sm font-bold uppercase tracking-wider text-rose-400">Network Wire &amp; Gov Surveillance</h2>
+        <p class="text-xs text-slate-400 mt-0.5">Inspect raw headers, test tampering, or decrypt via Gov key</p>
+      </div>
+      <div id="wireLog" class="flex-1 overflow-y-auto p-4 space-y-3 text-xs"></div>
+    </section>
+  </main>
+
+  <script>
+    function showToast(msg, isError = false) {
+      const el = document.getElementById('toast')
+      el.textContent = msg
+      el.className = `fixed bottom-5 right-5 z-50 max-w-md px-4 py-3 rounded-xl shadow-2xl border text-sm font-medium ${
+        isError ? 'bg-rose-950 border-rose-500 text-rose-200' : 'bg-emerald-950 border-emerald-500 text-emerald-200'
+      }`
+      el.classList.remove('hidden')
+      setTimeout(() => el.classList.add('hidden'), 4000)
+    }
+
+    async function sendMsg(holdInNetwork) {
+      const sender = document.getElementById('senderSelect').value
+      const recipient = document.getElementById('recipientSelect').value
+      const input = document.getElementById('msgInput')
+      const plaintext = input.value.trim()
+      if (!plaintext) return
+      if (sender === recipient) return showToast('Sender and recipient must be different.', true)
+
+      input.value = ''
+      const res = await fetch('/api/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender, recipient, plaintext, holdInNetwork })
+      })
+      const data = await res.json()
+      if (!data.ok) return showToast(data.error, true)
+      if (holdInNetwork) showToast(`Packet #${data.packetId} held in transit! Send another message, then deliver this one out-of-order.`)
+      refreshUI()
+    }
+
+    async function deliverPacket(packetId) {
+      const res = await fetch('/api/deliver', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ packetId })
+      })
+      const data = await res.json()
+      if (!data.ok) return showToast(data.error, true)
+      showToast(`Delivered Packet #${packetId}: "${data.plaintext}"`)
+      refreshUI()
+    }
+
+    async function tamperPacket(packetId) {
+      const res = await fetch('/api/tamper', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ packetId })
+      })
+      const data = await res.json()
+      if (!data.ok) {
+        showToast(`Tampering Blocked! Exception thrown: ${data.error}`, true)
+      }
+    }
+
+    async function govDecrypt(packetId) {
+      const res = await fetch('/api/gov-decrypt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ packetId })
+      })
+      const data = await res.json()
+      if (!data.ok) return showToast(data.error, true)
+      showToast(`Gov Surveillance Decrypted Packet #${packetId}: "${data.decrypted}"`)
+    }
+
+    async function resetDemo() {
+      await fetch('/api/reset', { method: 'POST' })
+      showToast('All Double Ratchet sessions and keys regenerated.')
+      refreshUI()
+    }
+
+    async function refreshUI() {
+      const res = await fetch('/api/state')
+      const { logs, ratchets } = await res.json()
+      const activeSender = document.getElementById('senderSelect').value
+      const activeRecipient = document.getElementById('recipientSelect').value
+
+      // Render Chat Feed for selected pair
+      const chatFeed = document.getElementById('chatFeed')
+      const filtered = logs.filter(l =>
+        (l.sender === activeSender && l.recipient === activeRecipient) ||
+        (l.sender === activeRecipient && l.recipient === activeSender)
+      )
+
+      chatFeed.innerHTML = filtered.length === 0
+        ? `<div class="text-center text-slate-500 text-sm mt-12">No messages between ${activeSender} and ${activeRecipient} yet.</div>`
+        : filtered.map(m => {
+            const isMine = m.sender === activeSender
+            const isDelayed = m.status === 'DELAYED_IN_TRANSIT'
+            return `
+              <div class="flex flex-col ${isMine ? 'items-end' : 'items-start'}">
+                <span class="text-[11px] text-slate-400 mb-1">${m.sender} → ${m.recipient} (Msg #${m.metadata.n})</span>
+                <div class="max-w-[80%] px-3.5 py-2 rounded-2xl text-sm ${
+                  isDelayed
+                    ? 'bg-amber-950/70 border border-amber-500/50 text-amber-200'
+                    : isMine
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-800 text-slate-100'
+                }">
+                  ${isDelayed ? '⏳ [Held in Network Queue — Click Deliver on Right]' : m.deliveredPlaintext}
+                </div>
+              </div>
+            `
+          }).join('')
+
+      // Render Ratchet State Cards
+      const ratchetCards = document.getElementById('ratchetCards')
+      ratchetCards.innerHTML = Object.entries(ratchets).map(([pair, st]) => `
+        <div class="bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs space-y-1.5">
+          <div class="font-bold text-emerald-400 flex justify-between">
+            <span>${pair}</span>
+            <span class="text-slate-500">${st.initialized ? 'ACTIVE' : 'IDLE'}</span>
+          </div>
+          ${st.initialized ? `
+            <div class="grid grid-cols-3 gap-1 text-center bg-slate-900 p-1.5 rounded-lg">
+              <div><div class="text-slate-500">Ns</div><div class="font-mono font-bold">${st.Ns}</div></div>
+              <div><div class="text-slate-500">Nr</div><div class="font-mono font-bold">${st.Nr}</div></div>
+              <div><div class="text-slate-500">Skipped</div><div class="font-mono font-bold text-amber-400">${st.skippedKeysCount}</div></div>
+            </div>
+            <div class="text-[11px] text-slate-400 font-mono truncate">DHs: ${st.DHs_x}</div>
+            <div class="text-[11px] text-slate-400 font-mono truncate">DHr: ${st.DHr_x}</div>
+          ` : `<div class="text-slate-500 italic">Awaiting first message...</div>`}
+        </div>
+      `).join('')
+
+      // Render Network & Gov Wiretap Log
+      const wireLog = document.getElementById('wireLog')
+      wireLog.innerHTML = logs.slice().reverse().map(p => `
+        <div class="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
+          <div class="flex justify-between items-center">
+            <span class="font-bold text-slate-200">Packet #${p.id}: ${p.sender} → ${p.recipient}</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-semibold ${
+              p.status === 'DELIVERED' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/20 text-amber-300'
+            }">${p.status}</span>
+          </div>
+          <div class="font-mono text-[11px] text-slate-400 space-y-0.5 bg-slate-900 p-2 rounded-lg">
+            <div>Chain n=${p.metadata.n}, pn=${p.metadata.pn}</div>
+            <div class="truncate">DH Pub: ${p.metadata.dhPubPreview}</div>
+            <div class="truncate">cGov: ${p.metadata.cGovHex}</div>
+            <div class="truncate text-sky-400">Ciphertext: ${p.metadata.ciphertextHex.slice(0, 36)}...</div>
+          </div>
+          <div class="flex flex-wrap gap-1.5 pt-1">
+            ${p.status === 'DELAYED_IN_TRANSIT' ? `
+              <button onclick="deliverPacket(${p.id})" class="bg-amber-600 hover:bg-amber-500 text-white px-2.5 py-1 rounded font-medium">
+                Deliver Now
+              </button>
+            ` : ''}
+            <button onclick="govDecrypt(${p.id})" class="bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30 px-2.5 py-1 rounded">
+              Gov Decrypt
+            </button>
+            <button onclick="tamperPacket(${p.id})" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded">
+              Test Tamper
+            </button>
+          </div>
+        </div>
+      `).join('')
+    }
+
+    refreshUI()
+  </script>
+</body>
+</html>
